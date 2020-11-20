@@ -7,6 +7,8 @@ using Akka.Persistence.Query;
 using Akka.Streams.Dsl;
 using Akka.Streams;
 using Reactive.Streams;
+using MongoDB.Driver;
+using Akka.Persistence.MongoDb.Journal;
 
 namespace Akka.Persistence.MongoDb.Query
 {
@@ -30,19 +32,73 @@ namespace Akka.Persistence.MongoDb.Query
         private readonly int _maxBufferSize;
         private readonly ExtendedActorSystem _system;
 
+        private readonly MongoDbJournalSettings _settings;
+
+        private Lazy<IMongoDatabase> _mongoDatabase;
+        private Lazy<IMongoCollection<JournalEntry>> _journalCollection;
+        private Lazy<IMongoCollection<MetadataEntry>> _metadataCollection;
+
         private readonly object _lock = new object();
         private IPublisher<string> _persistenceIdsPublisher;
+
+        private readonly Akka.Serialization.Serialization _serialization;
 
         /// <inheritdoc />
         public MongoDbReadJournal(ExtendedActorSystem system, Config config)
         {
-            _refreshInterval = config.GetTimeSpan("refresh-interval");
-            _writeJournalPluginId = config.GetString("write-plugin");
-            _maxBufferSize = config.GetInt("max-buffer-size"); 
             _system = system;
+            _mongoDatabase = new Lazy<IMongoDatabase>(() =>
+            {
+                var connectionString = new MongoUrl(_settings.ConnectionString);
+                var client = new MongoClient(connectionString);
 
-            _lock = new ReaderWriterLockSlim();
-            _persistenceIdsPublisher = null;
+                return client.GetDatabase(connectionString.DatabaseName);
+            });
+            _journalCollection = new Lazy<IMongoCollection<JournalEntry>>(() =>
+            {
+                var collection = _mongoDatabase.Value.GetCollection<JournalEntry>(_settings.Collection);
+
+                if (_settings.AutoInitialize)
+                {
+                    var modelForEntryAndSequenceNr = new CreateIndexModel<JournalEntry>(Builders<JournalEntry>
+                        .IndexKeys
+                        .Ascending(entry => entry.PersistenceId)
+                        .Descending(entry => entry.SequenceNr));
+
+                    collection.Indexes
+                        .CreateOneAsync(modelForEntryAndSequenceNr, cancellationToken: CancellationToken.None)
+                        .Wait();
+
+                    var modelWithOrdering = new CreateIndexModel<JournalEntry>(
+                        Builders<JournalEntry>
+                            .IndexKeys
+                            .Ascending(entry => entry.Ordering));
+
+                    collection.Indexes
+                        .CreateOne(modelWithOrdering);
+                }
+
+                return collection;
+            });
+
+            _metadataCollection = new Lazy<IMongoCollection<MetadataEntry>>(() =>
+            {
+                var collection = _mongoDatabase.Value.GetCollection<MetadataEntry>(_settings.MetadataCollection);
+
+                if (_settings.AutoInitialize)
+                {
+                    var modelWithAscendingPersistenceId = new CreateIndexModel<MetadataEntry>(
+                        Builders<MetadataEntry>
+                            .IndexKeys
+                            .Ascending(entry => entry.PersistenceId));
+
+                    collection.Indexes
+                        .CreateOneAsync(modelWithAscendingPersistenceId, cancellationToken: CancellationToken.None)
+                            .Wait();
+                }
+
+                return collection;
+            });
         }
 
         /// <summary>

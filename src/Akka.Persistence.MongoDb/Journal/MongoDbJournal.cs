@@ -546,7 +546,7 @@ namespace Akka.Persistence.MongoDb.Journal
             var max = await _journalCollection.Value.AsQueryable()
                     .Select(je => je.Ordering)
                     .Distinct().MaxAsync();
-
+            
             return max.Value;
         }
         
